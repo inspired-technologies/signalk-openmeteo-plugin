@@ -1,0 +1,34 @@
+{
+  "name": "openmeteo-signalk",
+  "version": "0.1.0",
+  "description": "SignalK plugin publishing current conditions & forecast from the Open-Meteo weather service",
+  "main": "index.js",
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "debug": "node --inspect-brk=192.168.0.97:9229 /usr/lib/node_modules/signalk-server/bin/signalk-server -c /home/pi/signalk"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/inspired-technologies/signalk-openmeteo-plugin.git"
+  },
+  "keywords": [
+    "signalk",
+    "signalk-node-server-plugin",
+    "signalk-category-weather"
+  ],
+  "author": "Inspired Technologies",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/inspired-technologies/signalk-openmeteo-plugin/issues"
+  },
+  "homepage": "https://github.com/inspired-technologies/signalk-openmeteo-plugin#readme",
+  "engines": {
+    "node": ">=20"
+  },
+  "signalk": {
+    "displayName": "Open-Meteo Forecast"
+  },
+  "dependencies": {
+    "debug": "^4.4.3"
+  }
+}
