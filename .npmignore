@@ -1,0 +1,10 @@
+#vscode
+.vscode
+#github
+.github
+#tests
+test
+#AI & internal
+.ai
+CLAUDE.md
+docs/backlog.md
