@@ -151,3 +151,6 @@ vite.config.ts.timestamp-*
 # AI
 .ai/
 CLAUDE.md
+
+# Docs
+docs/backlog.md
