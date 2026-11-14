@@ -32,7 +32,7 @@ Forecast data is purely based on position - hence `navigation.position` needs to
 Without internet connection (e.g. at sea) the plugin keeps running quietly: the failure is reported once in the plugin status, retries back off from 1 up to 15 minutes and are only noted in the debug log. Requests are not queued - the next successful request publishes the latest forecast for the current position. Published values expire after one hour (meta `timeout`), so outdated forecasts are not shown as current.
 
 ### Logging
-Enable *Debug log* in the plugin configuration (debug namespace `openmeteo-signalk`) to follow requests, configuration and retries in the server log.
+Enable *Debug log* in the plugin configuration (debug namespace `openmeteo-signalk`) for a readable summary in the server log: the configured models and what is published on start, each received forecast with the number of values per model and the time of the next update, and connectivity problems with retry and recovery. Request URLs and the API key are never logged.
 
 The plugin publishes, depending on the selected measurements:
 
@@ -50,7 +50,11 @@ The plugin publishes, depending on the selected measurements:
 All values follow the SignalK units (K, Pa, ratio, m/s, rad, m) - precipitation is published in mm/h (mm for sums), as in the OpenWeather plugin. Meta data incl. units, description and a timeout is published at start.
 
 ### Sources
-Values are published with the `$source` `openmeteo-signalk.<model>` (marine data: `openmeteo-signalk.marine`), so the model a value is based on is always visible and SignalK source priorities can be applied. With a second model both models publish on the same paths, each with its own `$source` (e.g. `openmeteo-signalk.icon_seamless` and `openmeteo-signalk.ecmwf_ifs025`). A model only publishes the values it provides - e.g. ECMWF provides no visibility.
+Values are published with the `$source` `openmeteo-signalk.<model>` (marine data: `openmeteo-signalk.marine`), so the model a value is based on is always visible. With a second model both models publish on the same paths, each with its own `$source` (e.g. `openmeteo-signalk.icon_seamless` and `openmeteo-signalk.ecmwf_ifs025`). A model only publishes the values it provides - e.g. ECMWF provides no visibility.
+
+On servers with source priority groups (*Data → Priorities*) the plugin ranks both models as group `openmeteo-signalk` on every start: consumers receive the first model, the second one fills only the paths the first does not provide. The group is kept in memory and saved only when priorities are saved in the admin UI; the configured model order always wins on the next start. Models ranked by the user in another group are left untouched.
+
+Other plugins publishing the same paths more often than hourly (e.g. the OpenWeather plugin) take over a path shortly after each hourly update - priorities fail over after a few seconds without data. Disable that source for the shared paths in *Data → Priorities*, or do not run both plugins for the same paths.
 
 ### Weather codes
 `weather.code` is a [WMO weather interpretation code](https://open-meteo.com/en/docs#weather_variable_documentation). `weather`, `description` and `weather.icon` are derived from it following the conventions of the OpenWeather plugin (e.g. `Clouds`, `overcast`, `04d`).
