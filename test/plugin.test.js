@@ -114,3 +114,40 @@ describe('plugin', () => {
     assert.equal(new Set(paths).size, paths.length);
   });
 });
+
+describe('source priority', () => {
+  function createServer(groups) {
+    const app = createApp();
+    app.activated = 0;
+    app.config = { settings: { priorityGroups: groups } };
+    app.activateSourcePriorities = () => { app.activated += 1; };
+    return app;
+  }
+
+  it('ranks two models as a priority group on start', () => {
+    const app = createServer(undefined);
+    const plugin = pluginFactory(app);
+    plugin.start({ model: 'ecmwf_ifs', model2: 'icon_eu' });
+    plugin.stop();
+    assert.deepEqual(app.config.settings.priorityGroups,
+      [{ id: 'openmeteo-signalk', sources: ['openmeteo-signalk.ecmwf_ifs', 'openmeteo-signalk.icon_eu'] }]);
+    assert.equal(app.activated, 1);
+
+    plugin.start({ model: 'ecmwf_ifs', model2: 'icon_eu' }); // unchanged - no re-activation
+    plugin.stop();
+    assert.equal(app.activated, 1);
+
+    plugin.start({ model: 'ecmwf_ifs' });                   // single model - group removed
+    plugin.stop();
+    assert.deepEqual(app.config.settings.priorityGroups, []);
+    assert.equal(app.activated, 2);
+  });
+
+  it('starts on servers without source priorities', () => {
+    const app = createApp();
+    const plugin = pluginFactory(app);
+    plugin.start({ model: 'ecmwf_ifs', model2: 'icon_eu' });
+    plugin.stop();
+    assert.deepEqual(app.errors, []);
+  });
+});

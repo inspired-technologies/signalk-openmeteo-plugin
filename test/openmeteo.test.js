@@ -415,3 +415,105 @@ describe('OpenMeteo service', () => {
     assert.equal(host.urls.length, 0);
   });
 });
+
+describe('log output', () => {
+  // debug writes through createDebug.log - collect the lines of the plugin namespace
+  const debug = require('debug');
+  function captureLog(fn) {
+    const lines = [];
+    const original = debug.log;
+    const enabled = debug.disable();
+    debug.enable('openmeteo-signalk');
+    debug.log = (...args) => lines.push(args.join(' '));
+    return Promise.resolve(fn()).then(() => lines).finally(() => {
+      debug.log = original;
+      debug.disable();
+      if (enabled) debug.enable(enabled);
+    });
+  }
+
+  it('summarises the configuration without the api key', () => {
+    const config = om.normalizeOptions({ model: 'ecmwf_ifs', model2: 'icon_eu', apikey: 'secret-key', distance: 5, today: true });
+    const lines = om.describeConfig(config);
+    assert.match(lines[0], /^Models: 1\. ECMWF IFS HRES 9 km \[ecmwf_ifs\], 2\. DWD ICON-EU \[icon_eu\] - same paths, ranked/);
+    assert.match(lines[1], /forecast \+1 h, .* 24 h, today$/);
+    assert.match(lines[3], /^Refresh: hourly, in between after 5 nm$/);
+    assert.match(lines[4], /customer API/);
+    assert.ok(!lines.join('\n').includes('secret-key'));
+    assert.match(om.describeConfig(om.normalizeOptions({}))[0], /^Models: 1\. Best match \[best_match\]$/);
+  });
+
+  it('logs a readable start, result and next update - no request urls, no api key', async () => {
+    const host = createHost(() => jsonResponse(forecastResponse({ models: ['ecmwf_ifs', 'icon_eu'] })));
+    const service = new om.OpenMeteo(host);
+    const lines = await captureLog(async () => {
+      service.start({ model: 'ecmwf_ifs', model2: 'icon_eu', apikey: 'secret-key', distance: 5 });
+      service.onPosition(POSITION);
+      await service.pending;
+      service.stop();
+    });
+    const text = lines.join('\n');
+    assert.ok(!text.includes('secret-key'));
+    assert.ok(!text.includes('http'));
+    assert.ok(!text.includes('Configuration: {'));
+    assert.match(text, /Models: 1\. ECMWF IFS/);
+    assert.match(text, /Forecast \+1 h for \d\d:\d\d received: ecmwf_ifs \d+, icon_eu \d+ values - next update at \d\d:\d\d or after 5 nm/);
+  });
+
+  it('logs connectivity problems with retry and recovery', async () => {
+    let online = true;
+    const host = createHost(() => {
+      if (!online) throw new TypeError('fetch failed', { cause: { code: 'ENOTFOUND' } });
+      return jsonResponse(forecastResponse());
+    });
+    const service = new om.OpenMeteo(host);
+    const lines = await captureLog(async () => {
+      service.start({});
+      service.position = POSITION;
+      let now = Date.now();
+      await service.tick(now);
+      online = false;
+      now += 3600 * 1000;
+      await service.tick(now);
+      now += service.retryDelay();
+      await service.tick(now);
+      online = true;
+      now += service.retryDelay();
+      await service.tick(now);
+      service.stop();
+    });
+    const text = lines.join('\n');
+    assert.match(text, /Open-Meteo unreachable: ENOTFOUND - next retry in 1 min, published values expire at \d\d:\d\d/);
+    assert.match(text, /Open-Meteo unreachable: ENOTFOUND - offline since \d\d:\d\d, attempt 2, next retry in 2 min/);
+    assert.match(text, /Open-Meteo reachable again - offline since \d\d:\d\d, 2 failed attempt\(s\)/);
+  });
+});
+
+describe('source priority', () => {
+  const ID = 'openmeteo-signalk';
+  const A = `${ID}.ecmwf_ifs`, B = `${ID}.icon_eu`, C = `${ID}.gfs_seamless`, OW = 'openweather-signalk';
+
+  it('adds a group for two models, none for a single model', () => {
+    assert.deepEqual(om.rankModels(undefined, ID, [A, B]), [{ id: ID, sources: [A, B] }]);
+    assert.equal(om.rankModels([], ID, [A]), null);
+    const other = { id: 'gps', sources: ['can0.1', 'can0.2'] };
+    assert.deepEqual(om.rankModels([other], ID, [A, B]), [other, { id: ID, sources: [A, B] }]);
+  });
+
+  it('updates the ranking, keeps sources the user added and the inactive flag', () => {
+    const saved = [{ id: ID, sources: [OW, B, A], inactive: true }];
+    assert.deepEqual(om.rankModels(saved, ID, [A, C]), [{ id: ID, sources: [OW, A, C], inactive: true }]);
+    assert.equal(om.rankModels([{ id: ID, sources: [A, B] }], ID, [A, B]), null); // unchanged
+  });
+
+  it('keeps a group with user sources for a single model, drops a pure model group', () => {
+    assert.deepEqual(om.rankModels([{ id: ID, sources: [B, A, OW] }], ID, [A]), [{ id: ID, sources: [A, OW] }]);
+    assert.deepEqual(om.rankModels([{ id: ID, sources: [A, B] }], ID, [A]), []);
+  });
+
+  it('leaves models alone that the user ranked in another group, ignores the marine source', () => {
+    assert.equal(om.rankModels([{ id: 'weather', sources: [OW, A] }], ID, [A, B]), null);
+    const marine = [{ id: 'waves', sources: [`${ID}.marine`, 'other'] }];
+    assert.deepEqual(om.rankModels(marine, ID, [A, B]), [...marine, { id: ID, sources: [A, B] }]);
+  });
+});
