@@ -14,7 +14,7 @@
 
 'use strict'
 const log = require('debug')('openmeteo-signalk')
-const { OpenMeteo, MODELS, GROUPS, DEFAULTS, LIMITS } = require('./openmeteo')
+const { OpenMeteo, MODELS, GROUPS, DEFAULTS, LIMITS, rankModels } = require('./openmeteo')
 
 const PLUGIN_ID = 'openmeteo-signalk'
 
@@ -46,7 +46,30 @@ module.exports = function (app) {
         )
 
         forecast.start(options || {})
+        rankSources(forecast.sources)
         log('Plugin started.')
+    }
+
+    // Two models publish the same paths: rank them as a priority group so that
+    // consumers receive the first model and the second one only fills its gaps.
+    // The group lives in memory (re-applied on every start); it is saved to
+    // priorities.json only when the user saves priorities in the admin UI.
+    function rankSources(sources) {
+        const settings = app.config && app.config.settings
+        if (!settings || typeof app.activateSourcePriorities !== 'function') {
+            if (sources.length > 1) log('Source priorities not supported by this server - rank the models in Data → Priorities')
+            return
+        }
+        try {
+            const groups = rankModels(settings.priorityGroups, PLUGIN_ID, sources)
+            if (!groups) return
+            settings.priorityGroups = groups
+            app.activateSourcePriorities()
+            const group = groups.find(g => g.id === PLUGIN_ID)
+            log(group ? `Source priority: ${group.sources.join(' > ')}` : 'Source priority group removed - single model')
+        } catch (e) {
+            log(`Source priorities not applied: ${e.message}`)
+        }
     }
 
     plugin.stop = function () {

@@ -306,6 +306,55 @@ function refreshDistance(value) {
     return convert.toSignalK('nm', Math.min(Math.max(nm, LIMITS.distance.min), LIMITS.distance.max)).value
 }
 
+// ── Log output ───────────────────────────────────────────────────────────────
+const METERS_PER_NM = 1852
+const clock = time => new Date(time).toTimeString().slice(0, 5)     // local hh:mm
+const modelTitle = id => (MODELS.find(m => m.id === id) || { title: id }).title.split(' - ')[0]
+
+/** Readable summary of the configuration for the debug log - never contains the api key. */
+function describeConfig(config) {
+    const models = config.models.map((m, i) => `${i + 1}. ${modelTitle(m)} [${m}]`).join(', ')
+    const publish = [`forecast +${config.offset} h`, `minimum / maximum / sum over ${config.horizon} h`]
+    if (config.today) publish.push('today')
+    if (config.current) publish.push('current conditions and sunlight')
+    const groups = Object.keys(GROUPS).filter(g => config.groups[g])
+    return [
+        `Models: ${models}` + (config.models.length > 1 ? ' - same paths, ranked in this order' : ''),
+        `Publishing: ${publish.join(', ')}`,
+        `Measurements: ${groups.length ? groups.join(', ') : 'none'}`,
+        `Refresh: hourly` + (config.distance !== null ? `, in between after ${Math.round(config.distance / METERS_PER_NM * 10) / 10} nm` : ''),
+        `Service: ${config.apikey ? 'customer API (own API key)' : 'free API'}, ${config.cellSelection} grid cells`,
+    ]
+}
+
+/**
+ * Ranks the models published on the same paths as a SignalK priority group
+ * (server ≥ 2.2x, Data → Priorities): the first model wins, the second one only
+ * fills paths the first does not provide. Returns the new list of groups, or
+ * null when nothing changes or the sources are ranked by the user elsewhere.
+ * Other sources the user added to the plugin's group (eg. OpenWeather) keep
+ * their place relative to the models.
+ */
+function rankModels(groups, id, sources) {
+    groups = Array.isArray(groups) ? groups : []
+    const own = ref => typeof ref === 'string' && ref.startsWith(id + '.') && ref !== `${id}.marine`
+    const index = groups.findIndex(g => g && g.id === id)
+    const others = groups.filter((g, i) => i !== index && g && Array.isArray(g.sources))
+    if (others.some(g => g.sources.some(own))) return null         // ranked by the user in another group
+    if (index < 0) return sources.length > 1 ? [...groups, { id, sources: [...sources] }] : null
+
+    const group = groups[index]
+    const current = Array.isArray(group.sources) ? group.sources : []
+    const first = current.findIndex(own)
+    const foreign = current.filter(s => !own(s))
+    const at = first < 0 ? 0 : current.slice(0, first).filter(s => !own(s)).length
+    const ranked = [...foreign.slice(0, at), ...sources, ...foreign.slice(at)]
+    const next = groups.slice()
+    if (ranked.length < 2) next.splice(index, 1)
+    else next[index] = Object.assign({}, group, { sources: ranked })
+    return JSON.stringify(next) === JSON.stringify(groups) ? null : next
+}
+
 // Normalises the plugin options - start({}) must work with defaults (SignalK CI).
 function normalizeOptions(options = {}) {
     const known = MODELS.map(m => m.id)
@@ -483,10 +532,16 @@ class OpenMeteo {
         this.altitude = null
         this.lastFetch = null
         this.lastFetchPosition = null
+        this.firstFailure = null
         this.lastFailure = null
         this.lastError = null
         this.failures = 0
         this.pending = null
+    }
+
+    /** $source labels of the models, in configured order. */
+    get sources() {
+        return this.config ? this.config.models.map(m => `${this.host.id}.${m}`) : []
     }
 
     get subscriptions() {
@@ -503,7 +558,7 @@ class OpenMeteo {
         this.config = normalizeOptions(options)
         this.generation++
         this.host.emit({ updates: [{ meta: buildMeta(this.config) }] })
-        log(`Configuration: ${JSON.stringify(Object.assign({}, this.config, { apikey: this.config.apikey ? '***' : '' }))}`)
+        describeConfig(this.config).forEach(line => log(line))
         this.host.status(`Waiting for ${NAV_POSITION}`)
 
         this.timer = setInterval(() => this.tick(), TICK_INTERVAL)
@@ -601,13 +656,20 @@ class OpenMeteo {
             if (updates.length) this.host.emit({ updates })
 
             if (this.failures > 0)
-                log(`Open-Meteo reachable again after ${this.failures} failed request(s) since ${new Date(this.lastFailure).toISOString()}`)
+                log(`Open-Meteo reachable again - offline since ${clock(this.firstFailure)}, ${this.failures} failed attempt(s)`)
             this.lastFetch = now
             this.lastFetchPosition = position
+            this.firstFailure = null
             this.lastFailure = null
             this.lastError = null
             this.failures = 0
             const valid = updates.length ? updates[0].values.find(v => v.path === PATH_FORECAST_TIME) : null
+            const received = updates.map(u => `${u.$source.slice(this.host.id.length + 1)} ${u.values.length}`)
+            log(`Forecast +${config.offset} h` + (valid ? ` for ${clock(valid.value)}` : '') +
+                ` received: ${received.length ? received.join(', ') + ' values' : 'no values'}` +
+                (marine instanceof Error ? ', marine unavailable' : '') +
+                ` - next update at ${clock(now + REFRESH_INTERVAL - TICK_INTERVAL)}` +
+                (config.distance !== null ? ` or after ${Math.round(config.distance / METERS_PER_NM * 10) / 10} nm` : ''))
             this.host.status(`Forecast ${config.models.join(', ')}` +
                 (valid ? ` for ${valid.value}` : '') +
                 ` at ${position.latitude.toFixed(2)}, ${position.longitude.toFixed(2)}` +
@@ -617,15 +679,18 @@ class OpenMeteo {
             // Offline periods (no internet at sea) must not flood the logs: report an
             // error once and whenever it changes, repeated failures go to the debug log only.
             this.failures++
+            if (this.failures === 1) this.firstFailure = now
             this.lastFailure = now
             if (e.message !== this.lastError) this.host.error(e.message)
             this.lastError = e.message
-            log(`${e.message} - attempt ${this.failures}, next retry in ${this.retryDelay() / ONE_MINUTE} min`)
+            const retry = `next retry in ${this.retryDelay() / ONE_MINUTE} min`
+            log(this.failures === 1
+                ? `${e.message} - ${retry}` + (this.lastFetch !== null ? `, published values expire at ${clock(this.lastFetch + REFRESH_INTERVAL)}` : '')
+                : `${e.message} - offline since ${clock(this.firstFailure)}, attempt ${this.failures}, ${retry}`)
         }
     }
 
     async request(url) {
-        log(`GET ${url.replace(/apikey=[^&]*/, 'apikey=***')}`)
         let response
         try {
             response = await this.fetch(url, { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(REQUEST_TIMEOUT) })
@@ -655,7 +720,9 @@ module.exports = {
     GROUPS,
     DEFAULTS,
     LIMITS,
+    rankModels,
     // exported for tests
+    describeConfig,
     normalizeOptions,
     buildForecastUrl,
     buildMarineUrl,
